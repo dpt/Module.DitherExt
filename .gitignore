@@ -1,0 +1,5 @@
+/DitherExt,ffa
+.DS_Store
+*.swp
+build/
+/C/DitherExt,ffa

@@ -1,0 +1,59 @@
+; DitherExtend 0.60 (13 Nov 2002) - C port of the Computer Concepts Ltd module.
+; The original help string has a copyright sign (&A9); plain text is used here.
+
+title-string: DitherExtend
+
+help-string: DitherExtend 0.60 (13 Nov 2002) (C) 1992-2002 Computer Concepts Ltd
+
+initialisation-code: Dither_init
+
+finalisation-code: Dither_final
+
+; &27 Service_Reset  &46 Service_ModeChange  &72 Service_PaletteChanged.
+; The original also accepts &80050 (not &50). Kept as found.
+service-call-handler: Dither_service 0x27 0x46 0x80050 0x72
+
+swi-chunk-base-number: 0x44580
+
+swi-handler-code: Dither_swi
+
+; SWI offsets &3C-&3F (ReadDitherState, SuspendDither, EnableDither and
+; DisableDither) are hidden. They have no names and are handled in Dither_swi.
+swi-decoding-table: DitherExtend,
+    SelectTable,
+    SelectGCOLTable,
+    ReturnGCOL,
+    SetGCOL,
+    ReturnColourNumber,
+    ReturnGCOLForMode,
+    ReturnColourNumberForMode,
+    ReturnOppGCOL,
+    SetOppGCOL,
+    ReturnOppColourNumber,
+    ReturnOppGCOLForMode,
+    ReturnOppColourNumberForMode,
+    GCOLToColourNumber,
+    ColourNumberToGCOL,
+    Info,
+    Control,
+    ReturnColourPattern,
+    ReturnColourPatternTable,
+    InvalidatePalette,
+    Antialias,
+    ReadPalette,
+    ReturnColourPatternArray,
+    SetHalftone,
+    ReturnHalftone,
+    SetHalftoneOrigin,
+    ReturnHalftoneOrigin,
+    SelectHalftoneTable,
+    ReturnHalftoneIntensity,
+    ReturnHalftoneTable,
+    SetScreen,
+    CacheScreen,
+    SelectColourPatternTable
+
+command-keyword-table: Dither_command
+    Dither(min-args:0, max-args:1,
+           invalid-syntax: "Syntax: *Dither [<dither option>]",
+           help-text: "This command is used to control dithering.\r<dither option> can be any of the following :\r\t0 - Use default dither\r\t1 - Disable dithering\r\t2 - Use greyscale dither\r\t4 - Use alternative four colour dither")

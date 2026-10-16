@@ -1,0 +1,1264 @@
+<?xml version="1.0"?>
+<!DOCTYPE riscos-prm PUBLIC "-//Gerph//DTD PRM documentation 1.03//EN"
+                            "http://gerph.org/dtd/103/prm.dtd">
+
+<!-- Interface reconstructed from the annotated disassembly (Asm/DitherExt.s),
+     the C port (C/src) and the README. Where the disassembly and the C port
+     differ, the disassembly is authoritative. -->
+
+<riscos-prm>
+<chapter title="DitherExtend">
+
+<section title="Introduction">
+<p>
+DitherExtend chooses colours for a screen mode, and where a mode has too few
+colours to show the one requested, builds a pattern of the colours that it does
+have so that the result looks like the colour asked for. It provides ordered
+and error-diffusion colour patterns for the 1, 2, 4, 8 and 16 bits per pixel
+modes, halftone screens built from a spot function, and the blending routine
+used to antialias graphics against an existing background.
+</p>
+<p>
+It extends the colour selection SWIs of ColourTrans. Callers which already use
+ColourTrans to pick colours receive dithered colours without change, while
+programs which want to control the dither or obtain the patterns themselves use
+the <reference type="swi" name="DitherExtend_SelectTable"/> family directly.
+Displaying the patterns, drawing with them and the colour management of source
+images belong to the clients and to ColourTrans.
+</p>
+</section>
+
+<section title="Overview">
+<p>
+The module provides the SWIs of the <reference type="swi" name="ColourTrans_SelectTable"/>
+group (SWI offsets &hex;00 to &hex;0D) with the same names and in the same order, so
+that a call to <reference type="swi" name="DitherExtend_ReturnGCOL"/> has the same shape as a
+call to <reference type="swi" name="ColourTrans_ReturnGCOL"/>. The
+results differ in that the module may build a pattern in place of a single
+solid colour. The remaining SWIs are extensions which give direct access to the
+patterns, the palette, the halftone screen and the antialiasing blenders.
+</p>
+<p>
+Dithering is switched on and off by a hidden SWI. While it is switched on,
+calls to the ColourTrans-compatible SWIs are passed to
+<reference type="vector" name="ColourV"/> so that every client of
+the colour system is dithered. A client which wants the module's own result for
+a single call suspends the pass-through first.
+</p>
+<p>
+The behaviour of dithering is controlled by the <reference type="command" name="Dither"/>
+command and by <reference type="swi" name="DitherExtend_Control"/>.
+</p>
+</section>
+
+<section title="Terminology">
+<p>
+<definition-table head-name="Term" head-value="Meaning">
+ <definition name="Colour word">A colour specified as a 32 bit word, <userinput>&hex;BBGGRR00</userinput>, with blue in
+   the top byte, then green, then red. The low byte is zero.</definition>
+ <definition name="Colour number">The value written into screen memory for a pixel (or
+   the palette index in a mode with a palette). In 16 bits per pixel modes it is a 15 bit colour; in
+   32 bits per pixel modes it is the top 24 bits of the colour word.</definition>
+ <definition name="GCOL value">The form of a colour number used with <userinput>GCOL</userinput> and
+   the VDU drivers. It differs from the colour number only in 256 colour modes, where the tint bits are
+   moved: bits 4 to 6 of the colour number are held in bits 3 to 5, and the tint is held in bit 6.</definition>
+ <definition name="Depth">The screen depth, as the logarithm to base 2 of the number of bits per pixel:
+   0 (1 bit), 1 (2 bits), 2 (4 bits), 3 (8 bits), 4 (16 bits) and 5 (32 bits).</definition>
+ <definition name="Mode argument">A mode number or a pointer to a mode selector, or -1 for the current mode.</definition>
+ <definition name="Palette argument">A pointer to a block of palette words, 0 for the default palette
+   of the mode's depth, or -1 for the current palette. The block holds 2, 4, 16 or 256 colour
+   words according to the depth.</definition>
+</definition-table>
+</p>
+</section>
+
+<section title="Technical details">
+
+<subsection title="Choosing colours">
+<p>
+The colour number SWIs find the palette entry nearest to the colour requested.
+The nearest entry is chosen differently according to the depth, and in
+256 colour modes according to the kind of palette. A 256 colour palette is
+classified as the default palette, a grey ramp, a 6x6x6 colour cube, or a custom
+palette. The classification is made again whenever the palette changes, so that
+the fastest search suitable for the palette is used.
+</p>
+<p>
+In 16 bits per pixel modes the colour is reduced to 15 bits. In 32 bits per pixel modes the colour
+number is the colour word shifted right by 8 bits, and no search is made.
+</p>
+<p>
+The <userinput>Opp</userinput> SWIs return the palette entry which is farthest from the colour
+requested, rather than the nearest, for use where the contrast with a colour is
+needed. In 16 and 32 bits per pixel modes they return the colour word unchanged.
+</p>
+</subsection>
+
+<subsection title="Dither flags">
+<p>
+The module keeps a flags word, which is read with <reference type="swi" name="DitherExtend_Info"/>
+and updated with <reference type="swi" name="DitherExtend_Control"/> and
+<reference type="command" name="Dither"/>.
+<bitfield-table>
+ <bit number="0" name="Two colour" state="set">Blend two palette colours by error diffusion</bit>
+ <bit number="1" name="Three colour" state="set">Blend three palette colours by error diffusion. Takes precedence over bit 0</bit>
+ <bit number="2" name="Luminance pattern" state="set">Build a pattern from the luminance of the colour, using the palette colours</bit>
+ <bit number="3" name="Ordered pattern" state="set">Use ordered patterns in the 4 and 8 bits per pixel modes</bit>
+ <bit number="4-15" state="reserved">Reserved</bit>
+ <bit number="16" name="Solid" state="set">Dithering disabled: solid colours only (set by <userinput>*Dither 1</userinput>)</bit>
+ <bit number="17" name="Greyscale" state="set">Greyscale dither (set by <userinput>*Dither 2</userinput>)</bit>
+ <bit number="18" name="Four colour" state="set">Alternative four colour dither (set by <userinput>*Dither 4</userinput>)</bit>
+ <bit number="19-31" state="reserved">Reserved</bit>
+</bitfield-table>
+</p>
+<p>
+Bits 0 to 3 are the control bits and are changed by <reference type="swi" name="DitherExtend_Control"/>.
+Bits 16 to 18 are the option, and are changed only by <reference type="command" name="Dither"/>.
+At a depth of 8 bits per pixel with a grey ramp palette, and in 16 bits per pixel modes with no flags set,
+a solid colour is always used.
+</p>
+</subsection>
+
+<subsection title="Dither state and ColourV">
+<p>
+The module is disabled when it is initialised. The hidden SWIs
+<reference type="swi" name="DitherExtend_EnableDither"/> and
+<reference type="swi" name="DitherExtend_DisableDither"/> change the state, and
+<reference type="swi" name="DitherExtend_ReadDitherState"/> reads it. Enabling or disabling
+dithering also invalidates the palette information held by the module.
+</p>
+<p>
+While the module is enabled, a call to any of the SWIs at offsets &hex;00 to &hex;0D is not handled
+directly. Instead the registers are passed to <reference type="vector" name="ColourV"/> (vector &hex;22) with R8
+holding the SWI offset and R9 holding the vector number, and the registers
+it returns are returned to the caller. <reference type="swi" name="DitherExtend_SuspendDither"/> makes the very next such call
+be handled by the module itself, after which the pass-through resumes.
+The other SWIs are never passed on.
+</p>
+</subsection>
+
+<subsection title="Palettes and caches">
+<p>
+The palette in use is read from the hardware when it is needed, and its classification is
+remembered until it is invalidated by <reference type="swi" name="DitherExtend_InvalidatePalette"/>,
+a change of mode or a change of palette. For modes of up to 8 bits per pixel the palette
+is held by the module and may be read with <reference type="swi" name="DitherExtend_ReadPalette"/>.
+</p>
+<p>
+Memory for the larger tables is allocated from the module area when first needed: a 4096 byte
+blend table at 4 bits per pixel, a &hex;9000 byte colour search cache for custom palettes at
+8 bits per pixel, and a &hex;20000 byte block returned by
+<reference type="swi" name="DitherExtend_ReturnColourPatternArray"/>. They are all freed when the palette
+changes, when the mode changes, on reset and when the module is finalised.
+</p>
+</subsection>
+
+<subsection title="Colour patterns">
+<p>
+A colour pattern is the arrangement of palette colours which, viewed from a distance,
+represents a colour that the mode cannot display directly.
+<reference type="swi" name="DitherExtend_ReturnColourPattern"/>,
+<reference type="swi" name="DitherExtend_ReturnColourPatternTable"/> and
+<reference type="swi" name="DitherExtend_SelectColourPatternTable"/> return patterns as 32 byte buffers.
+A buffer holds eight words, alternating between the pixels of an even scan line and the pixels
+of an odd scan line, and so describes a pattern 32 bits wide and 8 lines tall in the format
+of the current depth. The pattern is rotated by the halftone origin
+so that adjacent areas of the same colour line up.
+</p>
+<p>
+<reference type="swi" name="DitherExtend_SetGCOL"/> and <reference type="swi" name="DitherExtend_SetOppGCOL"/>
+build the same pattern, but write it into the pattern area of the VDU drivers so that it
+becomes the current graphics colour. The address of the pattern area is read from VDU variable
+&hex;AB when the module starts. The pattern area has room for two patterns of 16 words each; the
+foreground pattern is the first, and the background pattern follows it. Bit 7 of R3 selects the
+background pattern. Where a solid colour is sufficient, the GCOL value is returned in R0 as for
+<reference type="swi" name="ColourTrans_SetGCOL"/>.
+</p>
+</subsection>
+
+<subsection title="Halftone screens">
+<p>
+A halftone screen replaces the pattern selection with a threshold screen, so that
+the grey level of a colour is compared with the thresholds to choose between two colours. The screen
+is described by eight words, set with <reference type="swi" name="DitherExtend_SetHalftone"/> and
+read back with <reference type="swi" name="DitherExtend_ReturnHalftone"/>:
+<offset-table head-number="Word" head-name="Register" head-data-size="Size" head-value="Contents">
+ <offset number="0" name="R0" data-size="4">pointer to the thresholds, one byte for each position, or 0 if no screen is set</offset>
+ <offset number="4" name="R1" data-size="4">width of the screen in pixels</offset>
+ <offset number="8" name="R2" data-size="4">height of the screen in pixels</offset>
+ <offset number="C" name="R3" data-size="4">shift between successive rows</offset>
+ <offset number="10" name="R4" data-size="4">colour number used where the threshold is not exceeded</offset>
+ <offset number="14" name="R5" data-size="4">colour number used where the threshold is exceeded</offset>
+ <offset number="18" name="R6" data-size="4">reserved for the module, set to 0</offset>
+ <offset number="1C" name="R7" data-size="4">reserved for the module, set to 0</offset>
+</offset-table>
+</p>
+<p>
+<reference type="swi" name="DitherExtend_SetScreen"/> builds a screen from a spot function,
+and sets these values itself. <reference type="swi" name="DitherExtend_CacheScreen"/> converts the screen for one threshold
+into a bitmap that can be used directly as a pattern. A change of mode cancels the halftone screen.
+</p>
+<p>
+The halftone origin, set with <reference type="swi" name="DitherExtend_SetHalftoneOrigin"/>, fixes where the screen
+starts, so that screens drawn at different times join up.
+</p>
+</subsection>
+
+<subsection title="Antialiasing">
+<p>
+<reference type="swi" name="DitherExtend_Antialias"/> does not blend pixels itself. It returns a pointer to the module's
+workspace and a pointer to a blending routine suitable for the current depth. The caller invokes the routine
+directly. The routine is chosen from the depth, and for 8 bits per pixel modes from the palette type
+(default, grey ramp, colour cube or custom). The routines are entered with:
+<list type="unordered">
+ <item><p>IP = the workspace pointer returned in R0</p></item>
+ <item><p>R1 = pointer to the mask, one weight byte for each pixel</p></item>
+ <item><p>R2 = pointer to the source pixels</p></item>
+ <item><p>R3 = pointer to the destination pixels, which are updated</p></item>
+ <item><p>R4 = number of pixels</p></item>
+</list>
+</p>
+<p>
+A weight of 0 leaves the destination pixel unchanged, a weight of 16 copies the source pixel, and values between
+give a proportional mixture of the source and destination colours. The routine returns by loading R0 to IP and PC
+from the stack, so the caller must have stacked R0 to IP and the address to return to, in that order, before entering it.
+At 1 and 2 bits per pixel the count is rounded up in groups of 4 pixels. The routines do not depend on the
+caller's static base register and may be used from any code.
+</p>
+</subsection>
+
+</section>
+
+<section title="Service calls">
+
+<service-definition name="Reset" number="27"
+                    description="The machine has been reset">
+<entry>
+ <register-use number="1">&hex;27 (reason code)</register-use>
+</entry>
+<exit>
+ <register-use number="1" state="preserved"/>
+</exit>
+<use>
+<p>
+The module frees the memory it holds for its caches. Its state is otherwise left as it was.
+</p>
+</use>
+<related>
+ <reference type="service" name="ModeChange"/>
+ <reference type="service" name="PaletteChanged"/>
+</related>
+</service-definition>
+
+<service-definition name="ModeChange" number="46"
+                    description="The screen mode has changed">
+<entry>
+ <register-use number="1">&hex;46 (reason code)</register-use>
+</entry>
+<exit>
+ <register-use number="1" state="preserved"/>
+</exit>
+<use>
+<p>
+The module reads the new screen depth and eigenvalue factors, invalidates the palette
+classification, frees its caches, cancels any halftone screen and resets the halftone origin to 0,0.
+</p>
+</use>
+<related>
+ <reference type="service" name="Reset"/>
+ <reference type="service" name="PaletteChanged"/>
+</related>
+</service-definition>
+
+<service-definition name="PaletteChanged" number="72"
+                    description="The palette has changed">
+<entry>
+ <register-use number="1">&hex;72 (reason code)</register-use>
+</entry>
+<exit>
+ <register-use number="1" state="preserved"/>
+</exit>
+<use>
+<p>
+The module treats a palette change as it does a change of mode, and so discards its
+knowledge of the palette, its caches and the halftone screen.
+</p>
+</use>
+<related>
+ <reference type="service" name="ModeChange"/>
+ <reference type="swi" name="DitherExtend_InvalidatePalette"/>
+</related>
+</service-definition>
+
+</section>
+
+<section title="SWI calls">
+
+<p>
+The SWI chunk is &hex;44580 and the SWI names are prefixed with <userinput>DitherExtend_</userinput>.
+Offsets &hex;00 to &hex;0D are the ColourTrans-compatible SWIs. Any SWI offset from &hex;20 to &hex;3B, or above &hex;3F,
+returns the error <reference type="error" name="SWINotKnown"/>.
+Unless an error is returned, registers not listed as output are preserved.
+</p>
+
+<swi-definition name="DitherExtend_SelectTable" number="44580"
+                description="Builds a table converting the colours of one mode to colour numbers in another">
+<entry>
+ <register-use number="0">source mode (a mode argument)</register-use>
+ <register-use number="1">source palette (a palette argument), or 0 for the default</register-use>
+ <register-use number="2">destination mode (a mode argument)</register-use>
+ <register-use number="3">destination palette (a palette argument), or 0 for the default</register-use>
+ <register-use number="4">pointer to the buffer for the table</register-use>
+</entry>
+<exit>
+ <register-use number="0-4" state="preserved"/>
+</exit>
+<use>
+<p>
+For each colour in the source palette, one entry is written to the buffer with the colour number of the nearest colour
+in the destination mode. The entries are one byte for each colour at 1, 2, 4 and 8 bits per pixel, two bytes at 16 bits
+per pixel and four bytes at 32 bits per pixel. The source mode must have no more than 8 bits per pixel.
+</p>
+<p>
+It has the same interface as <reference type="swi" name="ColourTrans_SelectTable"/>, and is the target of that
+call while dithering is enabled.
+</p>
+<p>
+Errors are returned if either mode is invalid (<reference type="error" name="BadMode"/>).
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_SelectGCOLTable"/>
+ <reference type="swi" name="ColourTrans_SelectTable"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_SelectGCOLTable" number="44581"
+                description="Builds a table converting the colours of one mode to GCOL values in another">
+<entry>
+ <register-use number="0">source mode (a mode argument)</register-use>
+ <register-use number="1">source palette (a palette argument)</register-use>
+ <register-use number="2">destination mode (a mode argument)</register-use>
+ <register-use number="3">destination palette (a palette argument)</register-use>
+ <register-use number="4">pointer to the buffer for the table</register-use>
+</entry>
+<exit>
+ <register-use number="0-4" state="preserved"/>
+</exit>
+<use>
+<p>
+This is as <reference type="swi" name="DitherExtend_SelectTable"/>, except that when the destination mode has 256
+colours the entries are converted to GCOL values.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_SelectTable"/>
+ <reference type="swi" name="ColourTrans_SelectGCOLTable"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_ReturnGCOL" number="44582"
+                description="Returns the GCOL value for a colour in the current mode">
+<entry>
+ <register-use number="0">colour word</register-use>
+</entry>
+<exit>
+ <register-use number="0">GCOL value</register-use>
+</exit>
+<use>
+<p>
+Returns the colour number of the nearest colour in the current mode, converted to a GCOL value in 256 colour modes.
+In other modes the colour number is returned.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_ReturnColourNumber"/>
+ <reference type="swi" name="DitherExtend_ReturnGCOLForMode"/>
+ <reference type="swi" name="ColourTrans_ReturnGCOL"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_SetGCOL" number="44583"
+                description="Sets the graphics colour, building a dither pattern if required">
+<entry>
+ <register-use number="0">colour word</register-use>
+ <register-use number="3">
+  flags:
+  <bitfield-table>
+   <bit number="7" name="Background" state="clear">set the foreground pattern</bit>
+   <bit number="7" name="Background" state="set">set the background pattern</bit>
+   <bit number="0-6" state="reserved">ignored</bit>
+   <bit number="8-31" state="reserved">ignored</bit>
+  </bitfield-table>
+ </register-use>
+ <register-use number="4">mask row, of which only bits 0 to 2 are used</register-use>
+</entry>
+<exit>
+ <register-use number="0">GCOL value of the nearest solid colour</register-use>
+</exit>
+<use>
+<p>
+Builds the pattern for the colour in the pattern area of the VDU drivers, as described under
+<reference type="section" name="Technical details"/>. The mask row selects one of 8 masks which
+are applied to the pattern rows. Where a halftone screen has been set, the grey level
+of the colour is retained for use by <reference type="swi" name="DitherExtend_CacheScreen"/> instead of
+a pattern being built.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_SetOppGCOL"/>
+ <reference type="swi" name="DitherExtend_ReturnColourPattern"/>
+ <reference type="swi" name="ColourTrans_SetGCOL"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_ReturnColourNumber" number="44584"
+                description="Returns the colour number for a colour in the current mode">
+<entry>
+ <register-use number="0">colour word</register-use>
+</entry>
+<exit>
+ <register-use number="0">colour number</register-use>
+</exit>
+<use>
+<p>
+Returns the colour number of the palette entry nearest to the colour, without conversion to a GCOL value.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_ReturnGCOL"/>
+ <reference type="swi" name="ColourTrans_ReturnColourNumber"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_ReturnGCOLForMode" number="44585"
+                description="Returns the GCOL value for a colour in a given mode">
+<entry>
+ <register-use number="0">colour word</register-use>
+ <register-use number="1">mode (a mode argument)</register-use>
+ <register-use number="2">palette (a palette argument)</register-use>
+</entry>
+<exit>
+ <register-use number="0">GCOL value</register-use>
+</exit>
+<use>
+<p>
+As <reference type="swi" name="DitherExtend_ReturnGCOL"/> but for the mode and palette given.
+Returns the error <reference type="error" name="BadMode"/> if the mode is not valid.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_ReturnColourNumberForMode"/>
+ <reference type="swi" name="ColourTrans_ReturnGCOLForMode"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_ReturnColourNumberForMode" number="44586"
+                description="Returns the colour number for a colour in a given mode">
+<entry>
+ <register-use number="0">colour word</register-use>
+ <register-use number="1">mode (a mode argument)</register-use>
+ <register-use number="2">palette (a palette argument)</register-use>
+</entry>
+<exit>
+ <register-use number="0">colour number</register-use>
+</exit>
+<use>
+<p>
+As <reference type="swi" name="DitherExtend_ReturnColourNumber"/> but for the mode and palette given.
+Returns the error <reference type="error" name="BadMode"/> if the mode is not valid.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_ReturnGCOLForMode"/>
+ <reference type="swi" name="ColourTrans_ReturnColourNumberForMode"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_ReturnOppGCOL" number="44587"
+                description="Returns the GCOL value of the palette colour farthest from a colour">
+<entry>
+ <register-use number="0">colour word</register-use>
+</entry>
+<exit>
+ <register-use number="0">GCOL value</register-use>
+</exit>
+<use>
+<p>
+Returns the GCOL value of the palette entry in the current mode which is farthest from the colour.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_ReturnOppColourNumber"/>
+ <reference type="swi" name="ColourTrans_ReturnOppGCOL"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_SetOppGCOL" number="44588"
+                description="Sets the graphics colour to the colour farthest from a colour">
+<entry>
+ <register-use number="0">colour word</register-use>
+ <register-use number="3">flags, as for <reference type="swi" name="DitherExtend_SetGCOL"/></register-use>
+ <register-use number="4">mask row, as for <reference type="swi" name="DitherExtend_SetGCOL"/></register-use>
+</entry>
+<exit>
+ <register-use number="0">GCOL value of the colour used</register-use>
+</exit>
+<use>
+<p>
+As <reference type="swi" name="DitherExtend_SetGCOL"/>, but the colour used is the palette entry farthest
+from the colour requested, as returned by <reference type="swi" name="DitherExtend_ReturnOppGCOL"/>,
+and a solid colour is always set.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_SetGCOL"/>
+ <reference type="swi" name="ColourTrans_SetOppGCOL"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_ReturnOppColourNumber" number="44589"
+                description="Returns the colour number of the palette colour farthest from a colour">
+<entry>
+ <register-use number="0">colour word</register-use>
+</entry>
+<exit>
+ <register-use number="0">colour number</register-use>
+</exit>
+<use>
+<p>
+Returns the colour number of the palette entry in the current mode which is farthest from the colour.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_ReturnOppGCOL"/>
+ <reference type="swi" name="ColourTrans_ReturnOppColourNumber"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_ReturnOppGCOLForMode" number="4458A"
+                description="Returns the GCOL value of the palette colour farthest from a colour in a given mode">
+<entry>
+ <register-use number="0">colour word</register-use>
+ <register-use number="1">mode (a mode argument)</register-use>
+ <register-use number="2">palette (a palette argument)</register-use>
+</entry>
+<exit>
+ <register-use number="0">GCOL value</register-use>
+</exit>
+<use>
+<p>
+As <reference type="swi" name="DitherExtend_ReturnOppGCOL"/> but for the mode and palette given.
+Returns the error <reference type="error" name="BadMode"/> if the mode is not valid.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_ReturnOppColourNumberForMode"/>
+ <reference type="swi" name="ColourTrans_ReturnOppGCOLForMode"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_ReturnOppColourNumberForMode" number="4458B"
+                description="Returns the colour number of the palette colour farthest from a colour in a given mode">
+<entry>
+ <register-use number="0">colour word</register-use>
+ <register-use number="1">mode (a mode argument)</register-use>
+ <register-use number="2">palette (a palette argument)</register-use>
+</entry>
+<exit>
+ <register-use number="0">colour number</register-use>
+</exit>
+<use>
+<p>
+As <reference type="swi" name="DitherExtend_ReturnOppColourNumber"/> but for the mode and palette given.
+Returns the error <reference type="error" name="BadMode"/> if the mode is not valid.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_ReturnOppGCOLForMode"/>
+ <reference type="swi" name="ColourTrans_ReturnOppColourNumberForMode"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_GCOLToColourNumber" number="4458C"
+                description="Converts a GCOL value to a colour number">
+<entry>
+ <register-use number="0">GCOL value</register-use>
+</entry>
+<exit>
+ <register-use number="0">colour number</register-use>
+</exit>
+<use>
+<p>
+Converts a GCOL value for a 256 colour mode to the colour number. It does not depend on the current mode.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_ColourNumberToGCOL"/>
+ <reference type="swi" name="ColourTrans_GCOLToColourNumber"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_ColourNumberToGCOL" number="4458D"
+                description="Converts a colour number to a GCOL value">
+<entry>
+ <register-use number="0">colour number</register-use>
+</entry>
+<exit>
+ <register-use number="0">GCOL value</register-use>
+</exit>
+<use>
+<p>
+Converts a colour number for a 256 colour mode to the GCOL value. It does not depend on the current mode.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_GCOLToColourNumber"/>
+ <reference type="swi" name="ColourTrans_ColourNumberToGCOL"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_Info" number="4458E"
+                description="Reads the dither flags">
+<entry>
+</entry>
+<exit>
+ <register-use number="0">dither flags</register-use>
+</exit>
+<use>
+<p>
+Returns the dither flags, as described under <reference type="section" name="Technical details"/>.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_Control"/>
+ <reference type="command" name="Dither"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_Control" number="4458F"
+                description="Changes the dither control bits">
+<entry>
+ <register-use number="0">EOR mask (bits 0 to 3 are used)</register-use>
+ <register-use number="1">AND mask (bits 0 to 3 are used)</register-use>
+</entry>
+<exit>
+ <register-use number="0">new dither flags</register-use>
+</exit>
+<use>
+<p>
+The new control bits are calculated as (old AND R1) EOR R0, using only bits 0 to 3 of each register. The option held
+in bits 16 to 18 is not affected. To set bits, put the bits in R0 and clear them in R1;
+to clear bits, clear them in R1 and use zero in R0; to toggle bits, put the bits in R0 and set every bit of R1.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_Info"/>
+ <reference type="command" name="Dither"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_ReturnColourPattern" number="44590"
+                description="Returns the colour pattern for a colour in the current mode">
+<entry>
+ <register-use number="0">colour word</register-use>
+ <register-use number="2">pointer to a 32 byte buffer</register-use>
+</entry>
+<exit>
+ <register-use number="0-2" state="preserved"/>
+</exit>
+<use>
+<p>
+Writes the pattern which would be set for the colour by <reference type="swi" name="DitherExtend_SetGCOL"/> into the
+buffer, in the format described under <reference type="section" name="Technical details"/>.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_ReturnColourPatternTable"/>
+ <reference type="swi" name="DitherExtend_SelectColourPatternTable"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_ReturnColourPatternTable" number="44591"
+                description="Returns the patterns for a ramp of colours">
+<entry>
+ <register-use number="0">first colour word</register-use>
+ <register-use number="1">last colour word</register-use>
+ <register-use number="2">pointer to a buffer of 8192 bytes</register-use>
+</entry>
+<exit>
+ <register-use number="0-2" state="preserved"/>
+</exit>
+<use>
+<p>
+Writes 256 patterns into the buffer, each of 32 bytes. The colours are evenly spaced from the first colour to the last
+colour, and the pattern for each is as returned by
+<reference type="swi" name="DitherExtend_ReturnColourPattern"/>.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_ReturnColourPattern"/>
+ <reference type="swi" name="DitherExtend_ReturnHalftoneTable"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_InvalidatePalette" number="44592"
+                description="Discards the module's knowledge of the palette">
+<entry>
+</entry>
+<exit>
+</exit>
+<use>
+<p>
+Reads the palette again and classifies it, and frees the caches. This is called by clients which have changed
+the hardware palette without the module being told through
+<reference type="service" name="PaletteChanged"/>. In 16 and 32 bits per pixel modes no palette is read.
+</p>
+</use>
+<related>
+ <reference type="service" name="PaletteChanged"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_Antialias" number="44593"
+                description="Returns the antialiasing blend routine for the current mode">
+<entry>
+</entry>
+<exit>
+ <register-use number="0">pointer to the module's workspace</register-use>
+ <register-use number="1">pointer to the blend routine</register-use>
+</exit>
+<use>
+<p>
+Chooses a blending routine according to the depth of the current mode, as described under
+<reference type="section" name="Technical details"/>, and allocates the tables it needs.
+The pointers remain valid until the next mode or palette change.
+Returns the error <reference type="error" name="BadMode"/> if the depth cannot be handled.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_InvalidatePalette"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_ReadPalette" number="44594"
+                description="Reads the palette of a mode">
+<entry>
+ <register-use number="0">mode (a mode argument)</register-use>
+ <register-use number="1">palette (a palette argument)</register-use>
+ <register-use number="2">pointer to the buffer</register-use>
+</entry>
+<exit>
+ <register-use number="0-2" state="preserved"/>
+</exit>
+<use>
+<p>
+Copies the palette words into the buffer: 2, 4, 16 or 256 words according to the depth. The mode must have no more than
+8 bits per pixel.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_SelectTable"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_ReturnColourPatternArray" number="44595"
+                description="Returns the block of memory used for the pattern array">
+<entry>
+</entry>
+<exit>
+ <register-use number="0">pointer to the block of &hex;20000 bytes</register-use>
+</exit>
+<use>
+<p>
+Returns the module's array of patterns. The block is allocated the first time it is requested and remains until the
+caches are freed.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_ReturnColourPatternTable"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_SetHalftone" number="44596"
+                description="Sets the halftone screen">
+<entry>
+ <register-use number="0-7">halftone description, as described under <reference type="section" name="Technical details"/></register-use>
+</entry>
+<exit>
+ <register-use number="0-7" state="preserved"/>
+</exit>
+<use>
+<p>
+Stores the eight words. If R0 is non-zero, a halftone screen is in use for subsequent
+<reference type="swi" name="DitherExtend_SetGCOL"/> calls. R0 of 0 removes the screen.
+The thresholds are not copied, and must remain valid for as long as the screen is in use.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_ReturnHalftone"/>
+ <reference type="swi" name="DitherExtend_SetScreen"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_ReturnHalftone" number="44597"
+                description="Reads the halftone screen">
+<entry>
+</entry>
+<exit>
+ <register-use number="0-7">halftone description, or R0 = 0 if no screen is set</register-use>
+</exit>
+<use>
+<p>
+Returns the eight words set by <reference type="swi" name="DitherExtend_SetHalftone"/> or
+<reference type="swi" name="DitherExtend_SetScreen"/>. If there is no screen then only R0 is written,
+and it is 0.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_SetHalftone"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_SetHalftoneOrigin" number="44598"
+                description="Sets the origin of the halftone screen">
+<entry>
+ <register-use number="0">x coordinate (graphics units)</register-use>
+ <register-use number="1">y coordinate (graphics units)</register-use>
+</entry>
+<exit>
+ <register-use number="0-1" state="preserved"/>
+</exit>
+<use>
+<p>
+Sets the point on the screen from which the halftone screen and the colour patterns are aligned. The coordinates are
+relative to the current graphics origin. The x coordinate is stored as a bit position in the screen
+row and the y coordinate as a line counted from the top of the screen. Both are reset to 0 by a change of mode.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_ReturnHalftoneOrigin"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_ReturnHalftoneOrigin" number="44599"
+                description="Reads the origin of the halftone screen">
+<entry>
+</entry>
+<exit>
+ <register-use number="0">x origin, as a bit position in the screen row</register-use>
+ <register-use number="1">y origin, as a line counted from the top of the screen</register-use>
+</exit>
+<use>
+<p>
+Returns the values calculated by <reference type="swi" name="DitherExtend_SetHalftoneOrigin"/>.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_SetHalftoneOrigin"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_SelectHalftoneTable" number="4459A"
+                description="Builds a table of grey levels for the colours of a mode">
+<entry>
+ <register-use number="0">mode (a mode argument)</register-use>
+ <register-use number="1">palette (a palette argument)</register-use>
+ <register-use number="4">pointer to the buffer</register-use>
+</entry>
+<exit>
+ <register-use number="0-4" state="preserved"/>
+</exit>
+<use>
+<p>
+Writes one byte for each colour in the palette, giving its grey level from 0 to 255. The mode must have no more than
+8 bits per pixel.
+Returns the error <reference type="error" name="BadMode"/> if the mode is not valid.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_ReturnHalftoneIntensity"/>
+ <reference type="swi" name="DitherExtend_ReturnHalftoneTable"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_ReturnHalftoneIntensity" number="4459B"
+                description="Returns the grey level of a colour">
+<entry>
+ <register-use number="0">colour word</register-use>
+</entry>
+<exit>
+ <register-use number="0">grey level, from 0 (black) to 255 (white)</register-use>
+</exit>
+<use>
+<p>
+Returns the luminance of the colour, weighted for the sensitivity of the eye to each of the primaries.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_ReturnHalftoneTable"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_ReturnHalftoneTable" number="4459C"
+                description="Returns the grey levels of a ramp of colours">
+<entry>
+ <register-use number="0">first colour word</register-use>
+ <register-use number="1">last colour word</register-use>
+ <register-use number="2">pointer to a buffer of 256 bytes</register-use>
+</entry>
+<exit>
+ <register-use number="0-2" state="preserved"/>
+</exit>
+<use>
+<p>
+Writes 256 bytes giving the grey level of the colours spaced evenly from the first colour to the last.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_ReturnHalftoneIntensity"/>
+ <reference type="swi" name="DitherExtend_ReturnColourPatternTable"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_SetScreen" number="4459D"
+                description="Builds a halftone screen from a spot function">
+<entry>
+ <register-use number="0">
+  spot function:
+  <p>
+  <value-table head-number="Value" head-value="Function">
+   <value number="-1">round dot: the spot grows from the centre of the cell, and the background grows from its edges</value>
+   <value number="-2">inverse of function -3</value>
+   <value number="-3">elliptical: the sum of the squares of the distance from the centre of the cell</value>
+   <value number="-4">line: the distance on the vertical axis alone</value>
+   <value number="-5">cross: the smaller of the distances on the two axes</value>
+   <value number="-6">round dot repeated at twice the frequency</value>
+   <value number="other">pointer to a user routine</value>
+  </value-table>
+  </p>
+ </register-use>
+ <register-use number="1">screen angle, in degrees as a 16.16 fixed point number</register-use>
+ <register-use number="2">x size of the screen cell</register-use>
+ <register-use number="3">y size of the screen cell</register-use>
+ <register-use number="4">cell argument which scales the screen lattice</register-use>
+ <register-use number="5">colour number used where the threshold is not exceeded</register-use>
+ <register-use number="6">colour number used where the threshold is exceeded</register-use>
+</entry>
+<exit>
+ <register-use number="0-6" state="preserved"/>
+</exit>
+<use>
+<p>
+Builds the thresholds for a halftone screen of the angle and cell size requested, ranking the positions of the cell
+by the value of the spot function so that the screen is evenly graded from 0 to 255. The module owns the
+thresholds, and sets the halftone screen to use them, as if <reference type="swi" name="DitherExtend_SetHalftone"/>
+had been called. A cell of up to 1024 positions is supported.
+</p>
+<p>
+A user routine is called with R0 = x and R1 = y, signed fixed point numbers where 1.0 is
+&hex;10000, and returns the value in R2 as a signed fixed point number where 1.0 is &hex;1000000. Registers other than R0 to R2 must be preserved.
+</p>
+<p>
+Returns the error <reference type="error" name="ScreenSizeTooLarge"/> if the cell is too large, or is degenerate for the angle.
+</p>
+<p><fixme>The units of R2 to R4 are not established from the source.</fixme></p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_SetHalftone"/>
+ <reference type="swi" name="DitherExtend_CacheScreen"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_CacheScreen" number="4459E"
+                description="Converts the halftone screen at one threshold to a bitmap">
+<entry>
+ <register-use number="0">threshold key, 0 to 255</register-use>
+</entry>
+<exit>
+ <register-use number="0">pointer to the bitmap, or 0 if the screen cannot be cached</register-use>
+ <register-use number="1">width in bits of one row of the bitmap</register-use>
+</exit>
+<use>
+<p>
+Compares each threshold with the key and packs the result into a bitmap in the format of the current depth,
+using the two colours of the halftone screen. A row narrower than a word is repeated to fill the word.
+The bitmap is held by the module, and the last result is returned again if the same key is given
+twice. No bitmap is returned if no screen is set, if the depth is more than 8 bits per pixel, or if the
+bitmap would be larger than 64 words.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_SetScreen"/>
+ <reference type="swi" name="DitherExtend_SetHalftone"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_SelectColourPatternTable" number="4459F"
+                description="Builds a table of patterns for the colours of a mode">
+<entry>
+ <register-use number="0">mode (a mode argument)</register-use>
+ <register-use number="1">palette (a palette argument)</register-use>
+ <register-use number="4">pointer to the buffer</register-use>
+</entry>
+<exit>
+ <register-use number="0-4" state="preserved"/>
+</exit>
+<use>
+<p>
+Writes a 32 byte pattern for each colour of the palette, in the format used by
+<reference type="swi" name="DitherExtend_ReturnColourPattern"/>. The buffer must be 32 bytes for each palette entry.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_ReturnColourPattern"/>
+ <reference type="swi" name="DitherExtend_SelectTable"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_ReadDitherState" number="445BC"
+                description="Reads whether dithering is enabled">
+<entry>
+</entry>
+<exit>
+ <register-use number="0">
+  state:
+  <bitfield-table>
+   <bit number="0" name="Enabled" state="set">Calls are passed to ColourV</bit>
+   <bit number="1" name="Suspended" state="set">The next call is handled by the module</bit>
+   <bit number="2-31" state="reserved">Reserved</bit>
+  </bitfield-table>
+ </register-use>
+</exit>
+<use>
+<p>
+This SWI has no name in the module's SWI table, and is called by number. It can be called while dithering is in any state.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_EnableDither"/>
+ <reference type="swi" name="DitherExtend_SuspendDither"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_SuspendDither" number="445BD"
+                description="Handles the next call in the module instead of passing it to ColourV">
+<entry>
+</entry>
+<exit>
+</exit>
+<use>
+<p>
+If dithering is enabled, the next call to a SWI at offsets &hex;00 to &hex;0D is handled by the module itself, and the
+state then returns to that of passing calls to <reference type="vector" name="ColourV"/>.
+This allows a handler of <reference type="vector" name="ColourV"/> to ask for the module's own result. It has no effect if dithering
+is disabled. This SWI has no name in the module's SWI table, and is called by number.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_ReadDitherState"/>
+ <reference type="swi" name="DitherExtend_EnableDither"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_EnableDither" number="445BE"
+                description="Enables dithering">
+<entry>
+</entry>
+<exit>
+</exit>
+<use>
+<p>
+Enables dithering, so that calls to the ColourTrans-compatible SWIs are passed to <reference type="vector" name="ColourV"/>.
+The palette information is invalidated. This SWI has no name in the module's SWI table, and is called by number.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_DisableDither"/>
+ <reference type="swi" name="DitherExtend_SuspendDither"/>
+</related>
+</swi-definition>
+
+<swi-definition name="DitherExtend_DisableDither" number="445BF"
+                description="Disables dithering">
+<entry>
+</entry>
+<exit>
+</exit>
+<use>
+<p>
+Disables dithering, so that all of the SWIs are handled by the module. The palette information is invalidated.
+This SWI has no name in the module's SWI table, and is called by number.
+</p>
+</use>
+<related>
+ <reference type="swi" name="DitherExtend_EnableDither"/>
+ <reference type="swi" name="DitherExtend_ReadDitherState"/>
+</related>
+</swi-definition>
+
+</section>
+
+<section title="Commands">
+
+<command-definition name="Dither" description="Controls dithering">
+<syntax>
+ <optional><userreplace>dither option</userreplace></optional>
+</syntax>
+<parameter name="dither option">
+ <p>The option, from 0 to 255, of which only the low three bits are used:
+ <value-table head-number="Option" head-value="Dither">
+  <value number="0">Use the default dither</value>
+  <value number="1">Disable dithering</value>
+  <value number="2">Use a greyscale dither</value>
+  <value number="4">Use the alternative four colour dither</value>
+ </value-table>
+ </p>
+</parameter>
+<use>
+<p>
+Sets the option in bits 16 to 18 of the dither flags. The control bits are not changed.
+If no option is given, the default dither is used.
+</p>
+</use>
+<example>
+ <command>*Dither 2</command>
+</example>
+<related>
+ <reference type="swi" name="DitherExtend_Info"/>
+ <reference type="swi" name="DitherExtend_Control"/>
+</related>
+</command-definition>
+
+</section>
+
+<section title="Error messages">
+
+<error-definition name="DitherNoColourTrans" number="803000"
+                  description="ColourTrans needs to be installed before DitherExtend">
+<use>
+<p>
+Returned when the module is initialised and ColourTrans is not present.
+</p>
+</use>
+</error-definition>
+
+<error-definition name="BadMode" number="803003"
+                  description="Bad mode">
+<use>
+<p>
+Returned when a mode argument does not describe a screen mode, or describes a mode whose depth the SWI does not support.
+</p>
+</use>
+</error-definition>
+
+<error-definition name="ScreenSizeTooLarge" number="803004"
+                  description="Screen size too large">
+<use>
+<p>
+Returned by <reference type="swi" name="DitherExtend_SetScreen"/> when the cell for the angle and size requested has more
+positions than the module can hold, or has none.
+</p>
+</use>
+</error-definition>
+
+<error-definition name="SWINotKnown" number="1E6"
+                  description="SWI not known">
+<use>
+<p>
+Returned when the SWI offset is not one of the SWIs provided by the module.
+</p>
+</use>
+</error-definition>
+
+</section>
+
+<section title="Examples">
+
+<subsection title="Reading a colour pattern">
+<p>
+This reads the pattern used for mid-grey in the current mode and then reads its grey level.
+</p>
+<p>
+<extended-example type="basic">
+ Pattern for a colour
+ <br/><br/>
+ <userinput>DIM pattern% 32</userinput><br/>
+ <userinput>SYS "DitherExtend_ReturnColourPattern", &amp;80808000, 0, pattern%</userinput><br/>
+ <userinput>SYS "DitherExtend_ReturnHalftoneIntensity", &amp;80808000 TO grey%</userinput><br/>
+ <userinput>PRINT "Grey level ";grey%</userinput>
+</extended-example>
+</p>
+</subsection>
+
+<subsection title="Selecting a dither option">
+<p>
+This selects the greyscale dither from a program, and sets bit 1 of the control bits (three colour error diffusion),
+leaving the other control bits as they were.
+</p>
+<p>
+<extended-example type="basic">
+ Select the dither
+ <br/><br/>
+ <userinput>OSCLI "Dither 2"</userinput><br/>
+ <userinput>SYS "DitherExtend_Control", 2, NOT 2 TO flags%</userinput><br/>
+ <userinput>PRINT "Flags &amp;";~flags%</userinput>
+</extended-example>
+</p>
+</subsection>
+
+<subsection title="Blending with the antialias routine">
+<p>
+This obtains the blender and calls it to mix a row of source pixels into the destination. The code is entered with
+the mask, source, destination and pixel count in R5 to R8.
+</p>
+<p>
+<extended-example type="asm">
+ Antialias a row of pixels
+ <br/><br/>
+ <userinput>        SWI     "DitherExtend_Antialias"</userinput><br/>
+ <userinput>        MOVVS   pc, lr             ; Bad mode, or no room</userinput><br/>
+ <userinput>        MOV     r9, r1             ; the blend routine</userinput><br/>
+ <userinput>        MOV     ip, r0             ; IP = workspace</userinput><br/>
+ <userinput>        ADR     lr, done</userinput><br/>
+ <userinput>        STMFD   sp!, {r0-ip, lr}   ; the routine pops these and returns to done</userinput><br/>
+ <userinput>        MOV     r1, r5             ; mask</userinput><br/>
+ <userinput>        MOV     r2, r6             ; source</userinput><br/>
+ <userinput>        MOV     r3, r7             ; destination</userinput><br/>
+ <userinput>        MOV     r4, r8             ; pixel count</userinput><br/>
+ <userinput>        MOV     pc, r9</userinput><br/>
+ <userinput>done</userinput>
+</extended-example>
+</p>
+</subsection>
+
+</section>
+
+<section title="Compatibility">
+<p>
+The SWIs at offsets &hex;00 to &hex;0D have the interface of the ColourTrans SWIs of the same names, and
+may be used in their place. The module requires ColourTrans to be loaded before it is started.
+</p>
+</section>
+
+</chapter>
+
+<meta>
+ <maintainer>
+  <email name="Charles Ferguson" address="gerph@gerph.org"/>
+ </maintainer>
+ <disclaimer>
+  <p>
+   &copy; Charles Ferguson, 2026. DitherExtend is &copy; Computer Concepts Ltd, 1992-2002.
+  </p>
+ </disclaimer>
+ <history>
+  <revision number="0.60" author="Computer Concepts Ltd" date="13 Nov 2002" title="DitherExtend 0.60">
+   <change>Final release of the DitherExtend module.</change>
+  </revision>
+  <revision number="1" author="Charles Ferguson" date="17 Oct 2026" title="Initial interface document">
+   <change>Documented the SWI, service, command and error interface of DitherExtend 0.60.</change>
+  </revision>
+ </history>
+</meta>
+</riscos-prm>

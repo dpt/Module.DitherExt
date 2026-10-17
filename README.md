@@ -1,5 +1,7 @@
 # DitherExtend
 
+[![Documentation](https://img.shields.io/badge/Generated-Documentation-yellow)](https://dpt.github.io/Module.DitherExt/)
+
 A reverse engineering of the RISC OS module `DitherExtend` 0.60 (13 Nov 2002, Computer Concepts Ltd), together with a C port of it.
 
 DitherExtend provides halftone and colour pattern dithering, antialias blending and related colour conversion SWIs. Its SWI chunk is `&44580`.
@@ -10,6 +12,7 @@ DitherExtend provides halftone and colour pattern dithering, antialias blending 
 | ----------------- | ----------------------------------------------------------------------------------------------------- |
 | `Asm/DitherExt.s` | Annotated objasm disassembly with meaningful labels. Assembles byte-identical to the original module. |
 | `C/`              | CMHG module in C, ported routine by routine from the disassembly.                                     |
+| `prminxml/`       | Interface documentation in PRM-in-XML, published to GitHub Pages by `.github/workflows/pages.yml`.    |
 
 The original module binary is not part of this repository, as it is copyrighted. To verify the disassembly, assemble `Asm/DitherExt.s` and compare the output with your own copy of `DitherExt,ffa` (`DitherExtend` 0.60, `&6F1C` bytes).
 
